@@ -13,7 +13,12 @@ classifiers = [
     "Programming Language :: Python :: 3",
 ]
 keywords = ["azure-functions", "ms-graph", "graph", "suscription"]
-dependencies = ["azure-functions", "azure-identity", "azure-data-tables"]
+dependencies = [
+    "azure-functions",
+    "azure-identity",
+    "azure-data-tables",
+    "azure-functions-durable",
+]
 requires-python = ">=3.9"
 
 [project.optional-dependencies]

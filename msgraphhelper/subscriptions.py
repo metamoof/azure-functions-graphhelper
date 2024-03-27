@@ -1,17 +1,23 @@
 import datetime
-import hmac
+import functools
 import logging
 import os
 import secrets
-import urllib.parse
 from hashlib import sha256
-from re import T, sub
+from hmac import new
 
 import requests
 from azure import functions
 from azure.core.credentials import TokenCredential
 from azure.core.exceptions import HttpResponseError
 from azure.data.tables import TableClient, TableServiceClient
+from azure.data.tables.aio import TableClient as AsyncTableClient
+from azure.durable_functions import (
+    Blueprint,
+    DurableOrchestrationClient,
+    DurableOrchestrationContext,
+    OrchestrationRuntimeStatus,
+)
 from azure.identity import DefaultAzureCredential
 from typing_extensions import (
     Callable,
@@ -21,17 +27,17 @@ from typing_extensions import (
     Optional,
     Required,
     TypedDict,
+    Union,
 )
 
 from .session import get_graph_session
 
 ChangeType = Literal["created", "updated", "deleted"]
 
-
 Subscription = TypedDict(
     "Subscription",
     {
-        "@odata.type": str,
+        "@odata.type": NotRequired[Literal["#microsoft.graph.subscription"]],
         "applicationId": str,
         "changeType": ChangeType,
         "clientState": str,
@@ -64,8 +70,8 @@ SubscriptionRequest = TypedDict(
 )
 
 
-SubscriptionNotification = TypedDict(
-    "SubscriptionNotification",
+ChangeNotification = TypedDict(
+    "ChangeNotification",
     {
         "@odata.type": Required[Literal["#microsoft.graph.changeNotification"]],
         "changeType": Required[ChangeType],
@@ -83,12 +89,12 @@ SubscriptionNotification = TypedDict(
     },
 )
 
-SubscriptionNotificationCollection = TypedDict(
-    "SubscriptionNotificationCollection",
+ChangeNotificationCollection = TypedDict(
+    "ChangeNotificationCollection",
     {
         "@odata.type": Literal["#microsoft.graph.changeNotificationCollection"],
         "validationTokens": NotRequired[list[str]],
-        "value": list[SubscriptionNotification],
+        "value": list[ChangeNotification],
     },
 )
 
@@ -108,8 +114,19 @@ TableServiceSubscription = TypedDict(
     },
 )
 
+ChangeNotificationHandlerResponse = Union[dict, str, int, list, float, bool]
 
-class SubscriptionServiceBlueprint(functions.Blueprint):
+ChangeNotificationHandler = Callable[
+    [ChangeNotification], ChangeNotificationHandlerResponse
+]
+
+
+class FunctionHandlerInput(TypedDict):
+    function_name: str
+    change_notification: ChangeNotification
+
+
+class SubscriptionServiceBlueprint(Blueprint):
     def __init__(
         self,
         endpoint: str,
@@ -143,17 +160,27 @@ class SubscriptionServiceBlueprint(functions.Blueprint):
         self.validation_tokens = {}
         self.partition_key = sha256(self.endpoint.encode()).hexdigest()
         super().__init__(**kwargs)
+        self._add_bindings()
+
+    def _add_bindings(self):
         self.route(
             "subscriptions/handler",
             methods=["POST"],
             auth_level=functions.AuthLevel.ANONYMOUS,
-        )(self.handle_notification)
+        )(self.durable_client_input(client_name="client")(self.handle_notification))
         self.schedule(
             schedule="0 0 0 * * *",
             arg_name="myTimer",
             run_on_startup=True,
             use_monitor=False,
-        )(self.timer_trigger)
+        )(self.durable_client_input(client_name="client")(self.timer_trigger))
+        self.orchestration_trigger(context_name="context")(
+            self.update_subscriptions_orchestration
+        )
+        self.activity_trigger(input_name="input")(self.update_subscriptions_activity)
+        self.orchestration_trigger(context_name="context")(
+            self.change_notification_handler_orchestrator
+        )
 
     def _init_tables_store(self):
         logging.info(
@@ -175,6 +202,12 @@ class SubscriptionServiceBlueprint(functions.Blueprint):
             table_name=self.table_service_name,
         )
 
+    def _get_table_client_async(self) -> AsyncTableClient:
+        return AsyncTableClient.from_connection_string(
+            conn_str=self.table_service_connection_string,
+            table_name=self.table_service_name,
+        )
+
     def get_session(self) -> requests.Session:
         return get_graph_session(self.credentials, *self.scopes)
 
@@ -186,23 +219,52 @@ class SubscriptionServiceBlueprint(functions.Blueprint):
     def subscribe(
         self, changetype: ChangeType | List[ChangeType], resource: str
     ) -> Callable[
-        [Callable[[SubscriptionNotification], None]],
-        Callable[[SubscriptionNotification], None],
+        [ChangeNotificationHandler],
+        ChangeNotificationHandler,
     ]:
         if isinstance(changetype, list):
             changes = ",".join(changetype)
         else:
             changes = changetype
 
-        def wrapper(
-            f: Callable[[SubscriptionNotification], None]
-        ) -> Callable[[SubscriptionNotification], None]:
-            self.subscriptions[f"{changes}-{resource}"] = f
-            return f
+        def wrapper(f: ChangeNotificationHandler) -> ChangeNotificationHandler:
+            self.subscriptions[f"{changes}-{resource}"] = f.__name__
+
+            @self.activity_trigger(input_name="notification")
+            @functools.wraps(f)
+            def wrapped_notification_handler(
+                notification: ChangeNotification,
+            ) -> ChangeNotificationHandlerResponse:
+                return f(notification)
+
+            return wrapped_notification_handler
 
         return wrapper
 
-    def update_subscriptions(self):  # This needs to be done in a Singleton
+    async def update_subscriptions(self, client: DurableOrchestrationClient) -> None:
+        instance_id = f"update_subscriptions_{self.partition_key}"
+        existing_instance = await client.get_status(instance_id=instance_id)
+        if existing_instance.runtime_status in [
+            OrchestrationRuntimeStatus.Completed,
+            OrchestrationRuntimeStatus.Failed,
+            OrchestrationRuntimeStatus.Terminated,
+            None,
+        ]:
+            logging.info(f"Starting new instance of update_subscriptions")
+            instance_id = await client.start_new(
+                "update_subscriptions_orchestration", instance_id=instance_id
+            )
+        else:
+            logging.info(
+                f"Instance of update_subscriptions already running, not repeating"
+            )
+
+    def update_subscriptions_orchestration(self, context: DurableOrchestrationContext):
+        yield context.call_activity("update_subscriptions_activity")
+
+    def update_subscriptions_activity(
+        self, input: str
+    ):  # This needs to be done in a Singleton
         table = self._get_table_client()
         subscriptions_for_creation = []
         subscriptions_for_refresh = []
@@ -230,16 +292,14 @@ class SubscriptionServiceBlueprint(functions.Blueprint):
                     logging.info(f"Subscription {key} marked for recreation")
                     subscription["expirationDateTime"] = new_expiration
                     subscriptions_for_creation.append(subscription)
-                    del subscription["recreate"]
                 elif subscription.get("refresh"):
                     logging.info(f"Subscription {key} marked for refresh")
                     subscriptions_for_refresh.append(subscription)
-                    del subscription["refresh"]
                 else:
                     logging.info(f"Subscription {key} is valid and up to date")
-                    self.client_states[subscription["clientState"]] = (
-                        self.subscriptions[key]
-                    )
+                self.client_states[subscription["clientState"]] = self.subscriptions[
+                    key
+                ]
             except HttpResponseError as e:
                 if e.status_code == 404:
                     logging.info(f"Subscription {key} not found in the table")
@@ -272,6 +332,7 @@ class SubscriptionServiceBlueprint(functions.Blueprint):
                     partition_key=self.endpoint, row_key=subscription["RowKey"]
                 )
                 newsub["expirationDateTime"] = new_expiration
+                newsub["refresh"] = False
                 table.upsert_entity(entity=newsub)
             else:
                 logging.error(
@@ -304,6 +365,7 @@ class SubscriptionServiceBlueprint(functions.Blueprint):
                 logging.info(f"Subscription created: {response.json()}")
                 logging.info(f"Received headers: {response.headers}")
                 newsub["subscriptionId"] = response.json()["id"]
+                newsub["recreate"] = False
                 table.upsert_entity(entity=newsub)
             else:
                 logging.error(
@@ -313,8 +375,11 @@ class SubscriptionServiceBlueprint(functions.Blueprint):
     def set_validation_token(self, client_state: str, token: str) -> None:
         self.validation_tokens[client_state] = token
 
-    def handle_notification(
-        self, req: functions.HttpRequest, context: functions.Context
+    async def handle_notification(
+        self,
+        req: functions.HttpRequest,
+        context: functions.Context,
+        client: DurableOrchestrationClient,
     ) -> functions.HttpResponse:
         logging.info("Handling a Subscripion notification")
         logging.info(f"Request Params: {req.params}")
@@ -335,7 +400,6 @@ class SubscriptionServiceBlueprint(functions.Blueprint):
         else:
             try:
                 notifications = req.get_json()
-                # if notification["@odata.type"] == "#microsoft.graph.changeNotification":
                 if "value" not in notifications:
                     notifications = {"value": [notifications]}
                 for notification in notifications["value"]:
@@ -344,14 +408,14 @@ class SubscriptionServiceBlueprint(functions.Blueprint):
                             logging.info(
                                 f"Subscription {notification['subscriptionId']} removed"
                             )
-                            table = self._get_table_client()
+                            table = self._get_table_client_async()
                             row_key = sha256(
                                 f"{notification['changeType']}-{notification['resource']}".encode()
                             ).hexdigest()
                             subscription: TableServiceSubscription = table.get_entity(partition_key=self.partition_key, row_key=row_key)  # type: ignore
                             subscription["recreate"] = True
-                            table.upsert_entity(entity=subscription)
-                            self.update_subscriptions()
+                            await table.upsert_entity(entity=subscription)
+                            await self.update_subscriptions(client)
                             return functions.HttpResponse(
                                 status_code=202, headers={"Content-Type": "text/plain"}
                             )
@@ -361,14 +425,14 @@ class SubscriptionServiceBlueprint(functions.Blueprint):
                             logging.info(
                                 f"Subscription {notification['subscriptionId']} removed"
                             )
-                            table = self._get_table_client()
+                            table = self._get_table_client_async()
                             row_key = sha256(
                                 f"{notification['changeType']}-{notification['resource']}".encode()
                             ).hexdigest()
                             subscription: TableServiceSubscription = table.get_entity(partition_key=self.partition_key, row_key=row_key)  # type: ignore
                             subscription["refresh"] = True
-                            table.upsert_entity(entity=subscription)
-                            self.update_subscriptions()
+                            await table.upsert_entity(entity=subscription)
+                            await self.update_subscriptions(client)
                             return functions.HttpResponse(
                                 status_code=202, headers={"Content-Type": "text/plain"}
                             )
@@ -378,14 +442,21 @@ class SubscriptionServiceBlueprint(functions.Blueprint):
                             )
                         # Need to handle missed notifications!
                     elif notification["clientState"] in self.client_states:
-                        logging.info(
-                            f"Executing function {self.client_states[notification['clientState']].__name__}"
+                        func = self.client_states[notification["clientState"]]
+                        logging.info(f"Executing function {func}")
+                        funcinput = {
+                            "function_name": func,
+                            "change_notification": notification,
+                        }
+
+                        instance_id = await client.start_new(
+                            orchestration_function_name="change_notification_handler_orchestrator",
+                            instance_id=None,
+                            client_input=funcinput,
                         )
-                        self.client_states[notification["clientState"]](
-                            notification
-                        )  # this needs putting in an orchestrator
-                        return functions.HttpResponse(
-                            status_code=200, headers={"Content-Type": "text/plain"}
+
+                        return client.create_check_status_response(
+                            request=req, instance_id=instance_id
                         )
                     else:
                         return functions.HttpResponse(
@@ -397,10 +468,25 @@ class SubscriptionServiceBlueprint(functions.Blueprint):
                     status_code=400, headers={"Content-Type": "text/plain"}
                 )
 
-    def timer_trigger(self, myTimer: functions.TimerRequest) -> None:
+            return functions.HttpResponse(
+                status_code=400, headers={"Content-Type": "text/plain"}
+            )
+
+    async def timer_trigger(
+        self, myTimer: functions.TimerRequest, client: DurableOrchestrationClient
+    ) -> None:
         if myTimer.past_due:
             logging.info("The timer is past due!")
-        self.update_subscriptions()
+        await self.update_subscriptions(client)
+
+    def change_notification_handler_orchestrator(
+        self, context: DurableOrchestrationContext
+    ):
+        input: FunctionHandlerInput = context.get_input()  # type: ignore
+        response: ChangeNotificationHandlerResponse = yield context.call_activity(
+            name=input["function_name"], input_=input["change_notification"]
+        )
+        return response
 
 
 graph_endpoint = "https://graph.microsoft.com/v1.0/subscriptions/"
