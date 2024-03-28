@@ -30,7 +30,7 @@ from typing_extensions import (
     Union,
 )
 
-from .session import get_graph_session
+from .session import get_graph_session, graph_scope
 
 ChangeType = Literal["created", "updated", "deleted"]
 
@@ -101,8 +101,8 @@ ChangeNotificationCollection = TypedDict(
 TableServiceSubscription = TypedDict(
     "TableServiceSubscription",
     {
-        "PartitionKey": str,  # the endpoint
-        "RowKey": str,  # changeType-resource
+        "PartitionKey": str,  # sha256 of the endpoint
+        "RowKey": str,  # sha256 of changeType-resource
         "changeType": ChangeType,
         "resource": str,
         "expirationDateTime": str,
@@ -114,16 +114,20 @@ TableServiceSubscription = TypedDict(
     },
 )
 
+FunctionHandlerInput = TypedDict(
+    "FunctionHandlerInput",
+    {
+        "function_name": str,
+        "change_notification": ChangeNotification,
+    },
+)
+
+
 ChangeNotificationHandlerResponse = Union[dict, str, int, list, float, bool]
 
 ChangeNotificationHandler = Callable[
     [ChangeNotification], ChangeNotificationHandlerResponse
 ]
-
-
-class FunctionHandlerInput(TypedDict):
-    function_name: str
-    change_notification: ChangeNotification
 
 
 class SubscriptionServiceBlueprint(Blueprint):
@@ -194,7 +198,7 @@ class SubscriptionServiceBlueprint(Blueprint):
     def _get_notification_url(self) -> str:
         if "SubscriptionsHelperURL" in os.environ:
             return os.environ["SubscriptionsHelperURL"]
-        return f"{os.environ['WEBSITE_HOSTNAME']}/subscriptions/handler"
+        return f"{os.environ['WEBSITE_HOSTNAME']}/api/subscriptions/handler"
 
     def _get_table_client(self) -> TableClient:
         return TableClient.from_connection_string(
@@ -490,4 +494,3 @@ class SubscriptionServiceBlueprint(Blueprint):
 
 
 graph_endpoint = "https://graph.microsoft.com/v1.0/subscriptions/"
-graph_scope = "https://graph.microsoft.com/.default"

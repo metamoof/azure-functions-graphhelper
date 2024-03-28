@@ -2,7 +2,10 @@ import time
 
 import requests
 from azure.core.credentials import AccessToken, TokenCredential
+from flask import g
 from requests.auth import AuthBase
+
+graph_scope = "https://graph.microsoft.com/.default"
 
 
 class AzureIdentityCredentialAdapter(AuthBase):
@@ -65,6 +68,4 @@ def get_default_graph_session() -> requests.Session:
     """
     from azure.identity import DefaultAzureCredential
 
-    return get_graph_session(
-        DefaultAzureCredential(), "https://graph.microsoft.com/.default"
-    )
+    return get_graph_session(DefaultAzureCredential(), graph_scope)
