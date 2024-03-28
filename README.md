@@ -1,8 +1,10 @@
 # `msgraphhelper` - Handle MS Graph subscriptions in a pythonic manner in Azure Functions
 
-Hanling Change Notifications in Microsoft Graph, along with its subscriptions and lifecycle notifications is quite complex, but it's all repetitive boilerplate. This library deals with many of the standard complexities, making it easy to just create functions that will handle specific change notifications, with just a decorator that indicates what they should subscribe to.
+Handling Change Notifications in Microsoft Graph, along with its subscriptions and lifecycle notifications is quite complex, but it's all repetitive boilerplate. This library deals with many of the standard complexities, making it easy to just create functions that will handle specific change notifications, with just a decorator that indicates what they should subscribe to.
 
 This is a library for use in Azure Functions Python v2 applications. Currently Azure functions Python v1 is not supported.
+
+This library is still in active development, considered in alpha stage, and doesn't yet support 100% of the Graph Change Notifications API.
 
 ## Quick Start
 
@@ -63,6 +65,12 @@ This library makes heavy use of the Durable Functions programming paradigm:
 
 - The `SubscriptionServiceBlueprint` will update its subscriptions inside of a [Singleton instance](https://learn.microsoft.com/en-us/azure/azure-functions/durable/durable-functions-singletons?tabs=python)
 - The notifications handler will spin up a `change_notification_handler_orchestrator` for each notification, which will call your handler activity for each individual notification.
+
+## Security Considerations
+
+The `SubscriptionServiceBlueprint` handler endpoint is currently declared with `auth_level=AuthLevel.ANONYMOUS`, which means everybody in the world can spam it. Every subscription is created with a random token produced by [`secrets.token_urlsafe(64)`](https://docs.python.org/3/library/secrets.html#secrets.token_urlsafe), and MS Graph will send this token back to authenticate every notification. The handler endpoint will error if that token is not found, or there is no function associated with that secret. This token is passed on in the `ChangeNotification` object, so it will be seen by the handler, and it's also available to be read by any function or person with access to the table storage service used by the library.
+
+This does mean we are bypassing the azure functions security model, and can lead to performance issues, as functions automatically rejects function calls that don't carry the correct token when function authentication is used. I have an [open issue](https://github.com/metamoof/azure-functions-graphhelper/issues/9) to allow that security model to be used additionally to the above check. I don't currently have plans to support OAuth based models for authentication, as I believe Graph itself has no way to specify it.
 
 ## Logging
 
