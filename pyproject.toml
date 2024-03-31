@@ -3,16 +3,21 @@ requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "azure-function-msgraphhelper"
+name = "msgraphhelper"
 version = "0.0.1"
-description = "Azure Function MS Graph Helper"
+description = "Handle MS Graph Change Notifications in a Pythonic manner in Azure Functions"
+readme = "README.md"
 authors = [{ name = "Giles Antonio Radford", email = "moof@metamoof.net" }]
 classifiers = [
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
 ]
-keywords = ["azure-functions", "ms-graph", "graph", "suscription"]
+keywords = ["azure-functions", "ms-graph", "graph", "suscription", "Webhooks"]
 dependencies = [
     "azure-functions",
     "azure-identity",
@@ -23,3 +28,7 @@ requires-python = ">=3.9"
 
 [project.optional-dependencies]
 dev = ["pytest", "black"]
+
+[project.urls]
+Homepage = "https://github.com/metamoof/msgraphhelper"
+Issues = "https://github.com/metamoof/msgraphhelper/issues"
