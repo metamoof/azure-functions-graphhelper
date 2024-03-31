@@ -3,3 +3,5 @@
 .vscode
 thunder-tests
 test-output.xml
+dist/*
+build/*
