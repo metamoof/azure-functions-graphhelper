@@ -2,7 +2,6 @@ import time
 
 import requests
 from azure.core.credentials import AccessToken, TokenCredential
-from flask import g
 from requests.auth import AuthBase
 
 graph_scope = "https://graph.microsoft.com/.default"
