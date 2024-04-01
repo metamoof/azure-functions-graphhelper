@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "msgraphhelper"
-version = "0.1.0"
+version = "0.1.1"
 description = "Handle MS Graph Change Notifications in a Pythonic manner in Azure Functions"
 readme = "README.md"
 authors = [{ name = "Giles Antonio Radford", email = "moof@metamoof.net" }]
