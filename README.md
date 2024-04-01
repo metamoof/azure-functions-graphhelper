@@ -1,4 +1,4 @@
-# `msgraphhelper` - Handle MS Graph subscriptions in a pythonic manner in Azure Functions
+# MSGraphHelper - Handle MS Graph Change Notifications in a Pythonic manner in Azure Functions
 
 Handling Change Notifications in Microsoft Graph, along with its subscriptions and lifecycle notifications is quite complex, but it's all repetitive boilerplate. This library deals with many of the standard complexities, making it easy to just create functions that will handle specific change notifications, with just a decorator that indicates what they should subscribe to.
 

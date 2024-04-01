@@ -31,6 +31,7 @@ from typing_extensions import (
 )
 
 from .session import get_graph_session, graph_scope
+from .url import baseurl
 
 ChangeType = Literal["created", "updated", "deleted"]
 
@@ -136,14 +137,15 @@ class SubscriptionServiceBlueprint(Blueprint):
         endpoint: str,
         credential: TokenCredential,
         scopes: List[str],
-        table_service_connection_string: str = os.environ["AzureWebJobsStorage"],
+        table_service_connection_string: str | None = None,
         table_service_name: str = "subscriptionHelper",
         expiration_duration: datetime.timedelta = datetime.timedelta(days=3),
         expiration_tolerance: datetime.timedelta = datetime.timedelta(hours=36),
         notification_url: Optional[str] = None,
         **kwargs,
     ):
-
+        if table_service_connection_string is None:
+            table_service_connection_string = os.environ["AzureWebJobsStorage"]
         self.endpoint = endpoint
         if not self.endpoint.endswith("/"):
             self.endpoint += "/"
@@ -196,9 +198,12 @@ class SubscriptionServiceBlueprint(Blueprint):
         table = table_service.create_table_if_not_exists(self.table_service_name)
 
     def _get_notification_url(self) -> str:
+        # If we set the URL in the environment, use that
         if "SubscriptionsHelperURL" in os.environ:
             return os.environ["SubscriptionsHelperURL"]
-        return f"{os.environ['WEBSITE_HOSTNAME']}/api/subscriptions/handler"
+        # Otherwise, use the default, based on the calculation in url.py
+        # should default roughly to https://{WEBSITE_HOSTNAME}/api/subscriptions/handler
+        return f"{baseurl}/subscriptions/handler"
 
     def _get_table_client(self) -> TableClient:
         return TableClient.from_connection_string(
