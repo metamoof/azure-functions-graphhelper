@@ -309,3 +309,14 @@ class ODataBatchResponse(dict):
             for resp in json.loads(resptext)["responses"]:
                 self[resp["id"]] = resp
         return super().__init__()
+
+    def errors(self) -> dict:
+        """
+        Get all the responses that returned an error
+
+        :return: A dictionary of all the responses that returned an error
+        :rtype: dict
+        """
+        return dict(
+            (key, value) for key, value in self.items() if value["status"] >= 300
+        )
